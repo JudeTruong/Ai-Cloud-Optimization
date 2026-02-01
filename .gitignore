@@ -1,0 +1,15 @@
+# macOS junk
+.DS_Store
+
+# Raw / large datasets
+clusterdata/cluster-trace-v2018/data/*.csv
+
+# Images / binaries not needed for experiments
+*.jpg
+*.png
+# Raw / large datasets
+clusterdata/cluster-trace-v2018/data/raw/
+*.gz
+*.tar
+*.zip
+
