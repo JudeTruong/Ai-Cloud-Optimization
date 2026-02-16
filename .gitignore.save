@@ -1,0 +1,12 @@
+/usr/bin/python3 /Users/judetruong/CP395/Ai-Cloud-Optimization/clusterdata/cluster-trace-v2018/scripts/baseline_rolling_average.py
+/usr/bin/python3 /Users/judetruong/CP395/Ai-Cloud-Optimization/clusterdata/cluster-trace-v2018/scripts/baseline_rolling_average.py
+/usr/bin/python3 /Users/judetruong/CP395/Ai-Cloud-Optimization/clusterdata/cluster-trace-v2018/scripts/baseline_rolling_average.py
+/usr/bin/python3 /Users/judetruong/CP395/Ai-Cloud-Optimization/clusterdata/cluster-trace-v2018/scripts/baseline_rolling_average.py
+/usr/bin/python3 /Users/judetruong/CP395/Ai-Cloud-Optimization/clusterdata/cluster-trace-v2018/scripts/baseline_rolling_average.py
+# Large raw datasets
+clusterdata/cluster-trace-v2018/data/raw/
+clusterdata/cluster-trace-v2018/**/*.gz
+clusterdata/cluster-trace-v2018/**/*.tar
+
+/usr/bin/python3 /Users/judetruong/CP395/Ai-Cloud-Optimization/clusterdata/cluster-trace-v2018/scripts/baseline_rolling_average.py
+
