@@ -2,11 +2,13 @@ import os
 import numpy as np
 import pandas as pd
 
+from ortools_policy import run_ortools_policy
+
 
 def run_experiment(config, static_instances=10):
 
     # ==============================
-    # LOAD DATA
+    # LOAD DATA (ONCE)
     # ==============================
 
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,21 +17,26 @@ def run_experiment(config, static_instances=10):
     df = pd.read_csv(data_path)
     df = df.sort_values("time").reset_index(drop=True)
 
+    # Use EXACT same 300 windows as OR-Tools
+    df = df.iloc[:300].copy()
+
+    demand = df["task_arrivals"].values.tolist()
+
     # ==============================
-    # ROLLING AVERAGE PREDICTOR
+    # ROLLING PREDICTOR
     # ==============================
 
     df["prediction"] = (
         df["task_arrivals"]
         .rolling(window=config["window"])
-        .mean()
+        .max()
         .shift(1)
     )
 
-    df = df.dropna().reset_index(drop=True)
+    df["prediction"].fillna(method="bfill", inplace=True)
 
     # ==============================
-    # ROLLING POLICY WITH SMOOTHNESS
+    # ROLLING POLICY
     # ==============================
 
     instances = []
@@ -38,10 +45,8 @@ def run_experiment(config, static_instances=10):
     for pred in df["prediction"]:
         desired = int(np.ceil(pred / config["capacity_per_instance"]))
 
-        # max bound
         desired = min(desired, config["max_instances"])
 
-        # smoothness constraint
         if desired > prev_x:
             x_t = min(prev_x + config["max_delta"], desired)
         else:
@@ -51,10 +56,6 @@ def run_experiment(config, static_instances=10):
         prev_x = x_t
 
     df["required_instances"] = instances
-
-    # ==============================
-    # ROLLING METRICS
-    # ==============================
 
     df["capacity"] = (
         df["required_instances"] * config["capacity_per_instance"]
@@ -77,7 +78,7 @@ def run_experiment(config, static_instances=10):
     }
 
     # ==============================
-    # STATIC BASELINE
+    # STATIC POLICY
     # ==============================
 
     static_capacity = (
@@ -105,14 +106,37 @@ def run_experiment(config, static_instances=10):
             (static_under > 0).sum() / len(df) * 100
     }
 
+    # ==============================
+    # OR-TOOLS POLICY
+    # ==============================
+
+    ort_results = run_ortools_policy(
+        demand=demand,
+        instance_cost=config["instance_cost"],
+        C=config["capacity_per_instance"],
+        lambda_penalty=config["under_penalty"],
+        x_max=config["max_instances"],
+        delta_max=config["max_delta"]
+    )
+
+    allocation, total_under, total_instance_cost, sla_rate, total_obj = ort_results
+
+    ort_metrics = {
+        "total_cost": total_obj,
+        "total_under": total_under,
+        "total_over": 0,
+        "sla_violation_rate": sla_rate * 100
+    }
+
     return {
         "rolling": rolling_metrics,
-        "static": static_metrics
+        "static": static_metrics,
+        "ortools": ort_metrics
     }
 
 
 # =========================================
-# MAIN EXECUTION
+# MAIN
 # =========================================
 
 if __name__ == "__main__":
@@ -120,13 +144,11 @@ if __name__ == "__main__":
     CONFIG = {
         "window": 3,
         "capacity_per_instance": 100,
-        "max_instances": 50,
-        "max_delta": 5,
-        "instance_cost": 1,
-        "under_penalty": 5
+        "max_instances": 250,
+        "max_delta": 2,
+        "instance_cost": 10,
+        "under_penalty": 50
     }
-
-    np.random.seed(42)
 
     results = run_experiment(CONFIG)
 
@@ -138,4 +160,19 @@ if __name__ == "__main__":
     for k, v in results["static"].items():
         print(f"{k}: {round(v, 2)}")
 
+    print("\n===== OR-Tools Offline Optimal =====")
+    for k, v in results["ortools"].items():
+        print(f"{k}: {round(v, 2)}")
+    print("\n===== COMPARISON  =====")
+
+    rolling_cost = results["rolling"]["total_cost"]
+    optimal_cost = results["ortools"]["total_cost"]
+
+    gap = (rolling_cost - optimal_cost) / optimal_cost
+
+    print("Optimality gap:", gap)
+    gap_percent = gap * 100
+    print("Optimality gap (%):", round(gap_percent, 2))
+    print(results["rolling"]["total_under"])
+    print(results["rolling"]["sla_violation_rate"])
     print("\n===== End of Simulation =====\n")
