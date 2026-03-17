@@ -33,7 +33,7 @@ def run_experiment(config, static_instances=10):
         .shift(1)
     )
 
-    df["prediction"].fillna(method="bfill", inplace=True)
+    df["prediction"] = df["prediction"].bfill()
 
     # ==============================
     # ROLLING POLICY
@@ -76,7 +76,80 @@ def run_experiment(config, static_instances=10):
         "sla_violation_rate":
             (df["under"] > 0).sum() / len(df) * 100
     }
+    # ==============================
+    # TARGET TRACKING POLICY
+    # ==============================
 
+    TARGET_UTIL = 0.7
+    COOLDOWN = 0
+    DELAY = 1
+
+    instances = []
+    prev_x = 0
+    last_scale_time = -COOLDOWN
+
+    pending = []  # (time_to_apply, new_instances)
+
+    current_instances = 0
+
+    for t in range(len(df)):
+
+        demand_t = df.loc[t, "task_arrivals"]
+
+        # --- Apply delayed changes ---
+        for change in pending[:]:
+            apply_time, new_x = change
+            if t >= apply_time:
+                current_instances = new_x
+                pending.remove(change)
+
+        # --- Compute required instances ---
+        desired = int(np.ceil(
+            demand_t / (TARGET_UTIL * config["capacity_per_instance"])
+        ))
+
+        desired = min(desired, config["max_instances"])
+
+        # --- Cooldown + delta constraint ---
+        if t - last_scale_time >= COOLDOWN:
+
+            if desired > current_instances:
+                new_x = min(current_instances + config["max_delta"], desired)
+            else:
+                new_x = max(current_instances - config["max_delta"], desired)
+
+            if new_x != current_instances:
+                pending.append((t + DELAY, new_x))
+                last_scale_time = t
+
+        instances.append(current_instances)
+
+    df["tt_instances"] = instances
+
+    df["tt_capacity"] = (
+        df["tt_instances"] * config["capacity_per_instance"]
+    )
+
+    df["tt_under"] = np.maximum(
+        0, df["task_arrivals"] - df["tt_capacity"]
+    )
+
+    df["tt_over"] = np.maximum(
+        0, df["tt_capacity"] - df["task_arrivals"]
+    )
+
+    df["tt_cost"] = (
+        df["tt_instances"] * config["instance_cost"]
+        + df["tt_under"] * config["under_penalty"]
+    )
+
+    tt_metrics = {
+        "total_cost": df["tt_cost"].sum(),
+        "total_under": df["tt_under"].sum(),
+        "total_over": df["tt_over"].sum(),
+        "sla_violation_rate":
+            (df["tt_under"] > 0).sum() / len(df) * 100
+    }
     # ==============================
     # STATIC POLICY
     # ==============================
@@ -131,7 +204,8 @@ def run_experiment(config, static_instances=10):
     return {
         "rolling": rolling_metrics,
         "static": static_metrics,
-        "ortools": ort_metrics
+        "ortools": ort_metrics,
+        "target_tracking": tt_metrics
     }
 
 
@@ -145,7 +219,7 @@ if __name__ == "__main__":
         "window": 3,
         "capacity_per_instance": 100,
         "max_instances": 250,
-        "max_delta": 2,
+        "max_delta": 10,
         "instance_cost": 10,
         "under_penalty": 50
     }
@@ -175,4 +249,7 @@ if __name__ == "__main__":
     print("Optimality gap (%):", round(gap_percent, 2))
     print(results["rolling"]["total_under"])
     print(results["rolling"]["sla_violation_rate"])
+    print("\n===== Target Tracking Policy =====")
+    for k, v in results["target_tracking"].items():
+        print(f"{k}: {round(v, 2)}")
     print("\n===== End of Simulation =====\n")
