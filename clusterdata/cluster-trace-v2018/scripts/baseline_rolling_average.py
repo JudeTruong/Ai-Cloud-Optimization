@@ -5,11 +5,12 @@ import pandas as pd
 from ortools_policy import run_ortools_policy
 
 
-def run_experiment(config, static_instances=10):
+def run_experiment(config, static_instances=100):
 
     # ==============================
     # LOAD DATA (ONCE)
     # ==============================
+    
 
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(BASE_DIR, "..", "data", "sample_trace.csv")
@@ -20,7 +21,19 @@ def run_experiment(config, static_instances=10):
     # Use EXACT same 300 windows as OR-Tools
     df = df.iloc[:300].copy()
 
-    demand = df["task_arrivals"].values.tolist()
+    # ==============================
+    # MAP TO REAL CPU DEMAND
+    # ==============================
+
+    np.random.seed(42)
+
+    # simulate CPU usage per task (in cores)
+    df["cpu_per_task"] = np.random.uniform(0.04, 0.06, size=len(df))
+
+    # convert task arrivals to CPU demand
+    df["cpu_demand"] = (df["task_arrivals"] * df["cpu_per_task"] * 10).astype(int)
+
+    demand = df["cpu_demand"].values.tolist()
 
     # ==============================
     # ROLLING PREDICTOR
@@ -56,6 +69,11 @@ def run_experiment(config, static_instances=10):
         prev_x = x_t
 
     df["required_instances"] = instances
+    # ==============================
+    # ROLLING STABILITY
+    # ==============================
+    df["rolling_change"] = df["required_instances"].diff().abs()
+    rolling_stability = df["rolling_change"].sum()
 
     df["capacity"] = (
         df["required_instances"] * config["capacity_per_instance"]
@@ -74,7 +92,8 @@ def run_experiment(config, static_instances=10):
         "total_under": df["under"].sum(),
         "total_over": df["over"].sum(),
         "sla_violation_rate":
-            (df["under"] > 0).sum() / len(df) * 100
+            (df["under"] > 0).sum() / len(df) * 100,
+        "stability": rolling_stability
     }
     # ==============================
     # TARGET TRACKING POLICY
@@ -125,6 +144,11 @@ def run_experiment(config, static_instances=10):
         instances.append(current_instances)
 
     df["tt_instances"] = instances
+    # ==============================
+    # TARGET TRACKING STABILITY
+    # ==============================
+    df["tt_change"] = df["tt_instances"].diff().abs()
+    tt_stability = df["tt_change"].sum()
 
     df["tt_capacity"] = (
         df["tt_instances"] * config["capacity_per_instance"]
@@ -148,7 +172,8 @@ def run_experiment(config, static_instances=10):
         "total_under": df["tt_under"].sum(),
         "total_over": df["tt_over"].sum(),
         "sla_violation_rate":
-            (df["tt_under"] > 0).sum() / len(df) * 100
+            (df["tt_under"] > 0).sum() / len(df) * 100,
+        "stability": tt_stability
     }
     # ==============================
     # STATIC POLICY
@@ -159,11 +184,11 @@ def run_experiment(config, static_instances=10):
     )
 
     static_under = np.maximum(
-        0, df["task_arrivals"] - static_capacity
+    0, df["cpu_demand"] - static_capacity
     )
 
     static_over = np.maximum(
-        0, static_capacity - df["task_arrivals"]
+        0, static_capacity - df["cpu_demand"]
     )
 
     static_cost = (
@@ -178,7 +203,9 @@ def run_experiment(config, static_instances=10):
         "sla_violation_rate":
             (static_under > 0).sum() / len(df) * 100
     }
-
+    print("start")
+    print(df["cpu_demand"].head())
+    print(type(df["cpu_demand"].iloc[0]))
     # ==============================
     # OR-TOOLS POLICY
     # ==============================
@@ -193,20 +220,30 @@ def run_experiment(config, static_instances=10):
     )
 
     allocation, total_under, total_instance_cost, sla_rate, total_obj = ort_results
-
+    # ==============================
+    # OR-TOOLS STABILITY
+    # ==============================
+    ort_stability = sum(
+        abs(allocation[i] - allocation[i-1])
+        for i in range(1, len(allocation))
+    )
     ort_metrics = {
         "total_cost": total_obj,
         "total_under": total_under,
         "total_over": 0,
-        "sla_violation_rate": sla_rate * 100
+        "sla_violation_rate": sla_rate * 100,
+        "stability": ort_stability
     }
 
     return {
         "rolling": rolling_metrics,
         "static": static_metrics,
         "ortools": ort_metrics,
-        "target_tracking": tt_metrics
-    }
+        "target_tracking": tt_metrics,
+        "df": df,
+        "ort_allocation": allocation
+}
+    
 
 
 # =========================================
@@ -217,7 +254,7 @@ if __name__ == "__main__":
 
     CONFIG = {
         "window": 3,
-        "capacity_per_instance": 100,
+        "capacity_per_instance": 40,
         "max_instances": 250,
         "max_delta": 10,
         "instance_cost": 10,
