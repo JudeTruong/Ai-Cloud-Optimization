@@ -13,12 +13,6 @@ from policies.ml_policy import (
     run_hybrid_policy
 )
 
-
-SYSTEM_CONFIG = {
-    "scaling_delay": 2,
-    "cooldown": 3
-}
-
 # ==============================
 # LOAD DATA
 # ==============================
@@ -29,8 +23,6 @@ def load_data():
     df = pd.read_csv(data_path)
     df = df.sort_values("time").reset_index(drop=True)
 
-    df = df.iloc[:300].copy()
-
     return df
 
 
@@ -40,17 +32,14 @@ def load_data():
 def add_cpu_demand(df):
     np.random.seed(42)
 
-    # realistic heavy-tailed distribution
-    df["cpu_per_task"] = np.random.lognormal(mean=-3, sigma=0.1, size=len(df))
-    df["cpu_per_task"] = np.clip(df["cpu_per_task"], 0, 0.2)
-
+    df["cpu_per_task"] = np.random.lognormal(mean=-3, sigma=0.3, size=len(df))
     df["cpu_demand"] = (
         df["task_arrivals"] * df["cpu_per_task"] * 10
     ).astype(int)
 
-    # 🔥 add burst spikes AFTER computing demand
+    # add controlled spikes
     spike_idx = np.random.choice(len(df), size=10)
-    df.loc[spike_idx, "cpu_demand"] *= 1
+    df.loc[spike_idx, "cpu_demand"] *= 2
 
     return df
 
@@ -72,24 +61,8 @@ def compute_metrics(df, inst_col, config):
         + df["under"] * config["under_penalty"]
     )
 
-    # ======================
-    # NEW REALISTIC METRICS
-    # ======================
-
     # utilization
     df["utilization"] = df["cpu_demand"] / (df["capacity"] + 1e-6)
-
-    avg_util = df["utilization"].mean()
-    peak_util = df["utilization"].max()
-
-    # over-provision ratio
-    over_ratio = df["over"].sum() / (df["capacity"].sum() + 1e-6)
-
-    # SLA severity (how bad violations are)
-    if (df["under"] > 0).any():
-        avg_under = df.loc[df["under"] > 0, "under"].mean()
-    else:
-        avg_under = 0
 
     stability = df[inst_col].diff().abs().sum()
 
@@ -100,12 +73,8 @@ def compute_metrics(df, inst_col, config):
         "sla_violation_rate":
             (df["under"] > 0).sum() / len(df) * 100,
         "stability": stability,
-
-        # 🔥 new metrics
-        "avg_utilization": avg_util,
-        "peak_utilization": peak_util,
-        "over_provision_ratio": over_ratio,
-        "avg_sla_severity": avg_under
+        "avg_utilization": df["utilization"].mean(),
+        "peak_utilization": df["utilization"].max(),
     }
 
 
@@ -114,52 +83,83 @@ def compute_metrics(df, inst_col, config):
 # ==============================
 def run_experiment(config):
 
-    # Load data
+    # Load + preprocess
     df = load_data()
     df = add_cpu_demand(df)
 
-    demand = df["cpu_demand"].values.tolist()
+    # ==============================
+    # TRAIN / TEST SPLIT
+    # ==============================
+    split_idx = int(len(df) * 0.7)
+
+    df_train = df.iloc[:split_idx].copy()
+    df_test = df.iloc[split_idx:].copy()
+
+    df_test = df_test.reset_index(drop=True)
+
+    demand = df_test["cpu_demand"].values.tolist()
 
     # ==============================
-    # BASE POLICIES
+    # BASE POLICIES (on TEST)
     # ==============================
-    rolling_result = run_rolling_policy(df, config)
-    static_metrics = run_static_policy(df, config)
-    tt_result = run_target_tracking_policy(df, config)
+    rolling_result = run_rolling_policy(df_test, config)
+    tt_result = run_target_tracking_policy(df_test, config)
+    static_metrics = run_static_policy(df_test, config)
 
-    # Extract instances
-    df["rolling_instances"] = rolling_result["instances"]
-    df["tt_instances"] = tt_result["instances"]
+    df_test["rolling_instances"] = rolling_result["instances"]
+    df_test["tt_instances"] = tt_result["instances"]
 
-    # Build capacity (for animation)
-    df["rolling_capacity"] = (
-        df["rolling_instances"] * config["capacity_per_instance"]
+    df_test["rolling_capacity"] = (
+        df_test["rolling_instances"] * config["capacity_per_instance"]
     )
-    df["tt_capacity"] = (
-        df["tt_instances"] * config["capacity_per_instance"]
+    df_test["tt_capacity"] = (
+        df_test["tt_instances"] * config["capacity_per_instance"]
     )
 
     rolling_metrics = rolling_result["metrics"]
     tt_metrics = tt_result["metrics"]
 
     # ==============================
-    # ML + HYBRID
+    # ML TRAINING (TRAIN ONLY)
     # ==============================
-    model = train_ml_model(df, config["window"])
+    model = train_ml_model(df_train, config["window"])
 
-    # ML
-    ml_instances = run_ml_policy(df, model, config, config["window"])
-    df_ml = df.iloc[config["window"]:].copy()
+    # ==============================
+    # ML POLICY (TEST ONLY)
+    # ==============================
+    ml_instances = run_ml_policy(
+        df_test, model, config, config["window"]
+    )
+
+    df_ml = df_test.iloc[config["window"]:].copy()
     df_ml["ml_instances"] = ml_instances
 
     ml_metrics = compute_metrics(df_ml, "ml_instances", config)
 
-    # Hybrid
-    hybrid_instances = run_hybrid_policy(df, model, config, config["window"])
-    df_hybrid = df.iloc[config["window"]:].copy()
+    # ==============================
+    # HYBRID POLICY
+    # ==============================
+    hybrid_instances = run_hybrid_policy(
+        df_test, model, config, config["window"]
+    )
+
+    df_hybrid = df_test.iloc[config["window"]:].copy()
     df_hybrid["hybrid_instances"] = hybrid_instances
 
     hybrid_metrics = compute_metrics(df_hybrid, "hybrid_instances", config)
+
+    # ==============================
+    # ADD ML + HYBRID TO FULL DF
+    # ==============================
+    df_test["ml_capacity"] = 0
+    df_test.loc[config["window"]:, "ml_capacity"] = (
+        df_ml["ml_instances"].values * config["capacity_per_instance"]
+    )
+
+    df_test["hybrid_capacity"] = 0
+    df_test.loc[config["window"]:, "hybrid_capacity"] = (
+        df_hybrid["hybrid_instances"].values * config["capacity_per_instance"]
+    )
 
     # ==============================
     # OR-TOOLS
@@ -175,7 +175,7 @@ def run_experiment(config):
 
     allocation, total_under, _, sla_rate, total_obj = ort_results
 
-    df["ort_capacity"] = [
+    df_test["ort_capacity"] = [
         x * config["capacity_per_instance"] for x in allocation
     ]
 
@@ -192,20 +192,8 @@ def run_experiment(config):
         "stability": ort_stability
     }
 
-        # ML
-    df["ml_capacity"] = np.nan
-    df.loc[config["window"]:, "ml_capacity"] = (
-        df_ml["ml_instances"] * config["capacity_per_instance"]
-    )
-
-    # Hybrid
-    df["hybrid_capacity"] = np.nan
-    df.loc[config["window"]:, "hybrid_capacity"] = (
-        df_hybrid["hybrid_instances"] * config["capacity_per_instance"]
-    )
-
     # ==============================
-    # RETURN EVERYTHING
+    # RETURN RESULTS
     # ==============================
     return {
         "rolling": rolling_metrics,
@@ -214,7 +202,7 @@ def run_experiment(config):
         "ml": ml_metrics,
         "hybrid": hybrid_metrics,
         "ortools": ort_metrics,
-        "df": df,
+        "df": df_test,
         "ort_allocation": allocation
     }
 
@@ -226,17 +214,17 @@ if __name__ == "__main__":
 
     CONFIG = {
         "window": 5,
-        "capacity_per_instance": 4,   # moderate VM size
-        "max_instances": 2000,         # realistic cluster limit
-        "max_delta": 25,              # moderate scaling speed
-        "instance_cost": 0.02,        # normalized cost
-        "under_penalty": 6            # SLA penalty
+        "capacity_per_instance": 5,
+        "max_instances": 2000,
+        "max_delta": 25,
+        "instance_cost": 0.02,
+        "under_penalty": 6
     }
-
     results = run_experiment(CONFIG)
+
     for name in ["rolling", "static", "target_tracking", "ml", "hybrid", "ortools"]:
         print(f"\n===== {name.upper()} =====")
         for k, v in results[name].items():
-            print(f"{k}: {round(v, 4) if isinstance(v, float) else v}")
+            print(f"{k}: {round(v, 4)}")
 
     print("\n===== End of Simulation =====\n")
