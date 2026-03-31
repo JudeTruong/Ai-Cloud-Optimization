@@ -58,7 +58,7 @@ mapping = {
 # SIDE-BY-SIDE POLICIES
 # =========================
 
-LEFT_POLICY = "static"
+LEFT_POLICY = "ml"
 RIGHT_POLICY = "hybrid"
 
 name1, col1 = mapping[LEFT_POLICY]
