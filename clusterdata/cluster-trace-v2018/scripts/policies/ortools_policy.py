@@ -22,10 +22,6 @@ def run_ortools_policy(demand, instance_cost, C, lambda_penalty, x_max, delta_ma
         # Under-provision constraint
         model.Add(u >= demand[t] - x_t * C)
 
-    # Smoothness constraint
-    for t in range(1, T):
-        model.Add(x[t] - x[t-1] <= delta_max)
-        model.Add(x[t-1] - x[t] <= delta_max)
 
     # Objective
     model.Minimize(
