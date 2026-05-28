@@ -1,7 +1,8 @@
 import os
 import numpy as np
 import pandas as pd
-
+from pathlib import Path
+from metrics import compute_metrics
 # Policies
 from policies.rolling import run_rolling_policy
 from policies.target_tracking import run_target_tracking_policy
@@ -44,38 +45,6 @@ def add_cpu_demand(df):
     return df
 
 
-# ==============================
-# METRICS FUNCTION
-# ==============================
-def compute_metrics(df, inst_col, config):
-
-    df = df.copy()
-
-    df["capacity"] = df[inst_col] * config["capacity_per_instance"]
-
-    df["under"] = np.maximum(0, df["cpu_demand"] - df["capacity"])
-    df["over"] = np.maximum(0, df["capacity"] - df["cpu_demand"])
-
-    df["cost"] = (
-        df[inst_col] * config["instance_cost"]
-        + df["under"] * config["under_penalty"]
-    )
-
-    # utilization
-    df["utilization"] = df["cpu_demand"] / (df["capacity"] + 1e-6)
-
-    stability = df[inst_col].diff().abs().sum()
-
-    return {
-        "total_cost": df["cost"].sum(),
-        "total_under": df["under"].sum(),
-        "total_over": df["over"].sum(),
-        "sla_violation_rate":
-            (df["under"] > 0).sum() / len(df) * 100,
-        "stability": stability,
-        "avg_utilization": df["utilization"].mean(),
-        "peak_utilization": df["utilization"].max(),
-    }
 
 
 # ==============================
@@ -179,18 +148,9 @@ def run_experiment(config):
         x * config["capacity_per_instance"] for x in allocation
     ]
 
-    ort_stability = sum(
-        abs(allocation[i] - allocation[i-1])
-        for i in range(1, len(allocation))
-    )
+    df_test["ort_instances"] = allocation
 
-    ort_metrics = {
-        "total_cost": total_obj,
-        "total_under": total_under,
-        "total_over": 0,
-        "sla_violation_rate": sla_rate * 100,
-        "stability": ort_stability
-    }
+    ort_metrics = compute_metrics(df_test, "ort_instances", config)
 
     # ==============================
     # RETURN RESULTS
@@ -218,13 +178,53 @@ if __name__ == "__main__":
         "max_instances": 2000,
         "max_delta": 25,
         "instance_cost": 0.02,
-        "under_penalty": 6
+        "under_penalty": 6,
+        "static_instances": 1200
     }
+
     results = run_experiment(CONFIG)
 
-    for name in ["rolling", "static", "target_tracking", "ml", "hybrid", "ortools"]:
+    policies = ["static", "rolling", "target_tracking", "ml", "hybrid", "ortools"]
+
+    # Print results to terminal
+    for name in policies:
         print(f"\n===== {name.upper()} =====")
         for k, v in results[name].items():
             print(f"{k}: {round(v, 4)}")
 
     print("\n===== End of Simulation =====\n")
+
+    # Save results to root/results/
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    ROOT_DIR = SCRIPT_DIR.parents[2]
+    RESULTS_DIR = ROOT_DIR / "results"
+    RESULTS_DIR.mkdir(exist_ok=True)
+
+    rows = []
+
+    for name in policies:
+        metrics = results[name]
+
+        rows.append({
+            "policy": name,
+            "total_cost": metrics.get("total_cost"),
+            "sla_violation_rate": metrics.get("sla_violation_rate"),
+            "total_under": metrics.get("total_under"),
+            "total_over": metrics.get("total_over"),
+            "stability": metrics.get("stability"),
+            "avg_utilization": metrics.get("avg_utilization"),
+            "peak_utilization": metrics.get("peak_utilization")
+        })
+
+    comparison_df = pd.DataFrame(rows)
+
+    output_path = RESULTS_DIR / "final_comparison.csv"
+    comparison_df.to_csv(output_path, index=False)
+
+    print(f"Saved comparison table to: {output_path}")
+
+    # Save the full simulation dataframe too
+    trace_output_path = RESULTS_DIR / "simulation_trace_output.csv"
+    results["df"].to_csv(trace_output_path, index=False)
+
+    print(f"Saved full simulation output to: {trace_output_path}")
