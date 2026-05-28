@@ -1,11 +1,14 @@
 import numpy as np
+from metrics import compute_metrics
+
 
 def run_rolling_policy(df, config):
-
     df = df.copy()
 
+    demand_col = config.get("demand_col", "task_arrivals")
+
     df["prediction"] = (
-        df["task_arrivals"]
+        df[demand_col]
         .rolling(window=config["window"])
         .max()
         .shift(1)
@@ -30,26 +33,7 @@ def run_rolling_policy(df, config):
 
     df["instances"] = instances
 
-    # Metrics
-    df["capacity"] = df["instances"] * config["capacity_per_instance"]
-    df["under"] = np.maximum(0, df["cpu_demand"] - df["capacity"])
-    df["over"] = np.maximum(0, df["capacity"] - df["cpu_demand"])
-
-    df["cost"] = (
-        df["instances"] * config["instance_cost"]
-        + df["under"] * config["under_penalty"]
-    )
-
-    stability = df["instances"].diff().abs().sum()
-
     return {
-    "metrics": {
-        "total_cost": df["cost"].sum(),
-        "total_under": df["under"].sum(),
-        "total_over": df["over"].sum(),
-        "sla_violation_rate":
-            (df["under"] > 0).sum() / len(df) * 100,
-        "stability": stability
-    },
-    "instances": df["instances"].values
-}
+        "metrics": compute_metrics(df, "instances", config),
+        "instances": df["instances"].values
+    }

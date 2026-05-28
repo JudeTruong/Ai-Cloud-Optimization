@@ -1,16 +1,21 @@
 import numpy as np
 
 
-def compute_metrics(df, inst_col, config, demand_col="cpu_demand"):
+def compute_metrics(df, inst_col, config, demand_col=None):
     """
     Compute all autoscaling evaluation metrics in one consistent place.
 
-    demand_col:
-        The workload demand column used for evaluation.
-        Currently this is cpu_demand, but we will revisit this in the next step.
+    demand_col is the workload column used for evaluation.
+    For the main experiment, we use task_arrivals consistently.
     """
 
     df = df.copy()
+
+    if demand_col is None:
+        demand_col = config.get("demand_col", "task_arrivals")
+
+    if demand_col not in df.columns:
+        raise ValueError(f"Demand column '{demand_col}' not found in dataframe.")
 
     df["capacity"] = df[inst_col] * config["capacity_per_instance"]
 

@@ -5,16 +5,19 @@ from sklearn.linear_model import LinearRegression
 # ==============================
 # TRAIN ML MODEL
 # ==============================
-def train_ml_model(df, window=10):
+def train_ml_model(df, config):
     """
-    Train regression model on past window values → next value.
-    TRAIN DATA ONLY.
+    Train a linear regression model using the previous window values
+    to predict the next workload demand value.
     """
 
     X = []
     y = []
 
-    data = df["task_arrivals"].values
+    demand_col = config.get("demand_col", "task_arrivals")
+    window = config["window"]
+
+    data = df[demand_col].values
 
     for i in range(window, len(data)):
         X.append(data[i - window:i])
@@ -32,39 +35,51 @@ def train_ml_model(df, window=10):
 # ==============================
 # PURE ML POLICY
 # ==============================
-def run_ml_policy(df, model, config, window=10):
+def run_ml_policy(df, model, config, window=None):
+    """
+    Pure ML autoscaling policy.
 
-    data = df["task_arrivals"].values
+    Uses previous workload windows to predict demand, then converts
+    predicted demand into instance count.
+    """
+
+    if window is None:
+        window = config["window"]
+
+    demand_col = config.get("demand_col", "task_arrivals")
+    data = df[demand_col].values
 
     instances = []
     prev_instances = 0
 
     for t in range(window, len(data)):
 
-        # ==============================
-        # ML prediction
-        # ==============================
+        # Use only past demand values
         window_data = data[t - window:t]
+
+        # Predict current/next demand from past window
         pred = model.predict([window_data])[0]
 
-        current = data[t]
+        # Slight safety buffer to reduce under-provisioning
+        pred = pred * config.get("ml_safety_buffer", 1.1)
 
-        # 🔥 IMPROVED PREDICTION
-        pred = 0.7 * pred + 0.3 * current
-        pred = pred * 1.1   # slightly aggressive to reduce SLA
-
-        # ==============================
-        # Convert to instances
-        # ==============================
-        ml_instances = int(np.ceil(
+        # Convert predicted demand to instances
+        desired_instances = int(np.ceil(
             pred / config["capacity_per_instance"]
         ))
 
         # Apply bounds
-        ml_instances = max(0, min(ml_instances, config["max_instances"]))
+        desired_instances = max(
+            0,
+            min(desired_instances, config["max_instances"])
+        )
 
-        # Smooth scaling (reduce jitter)
-        ml_instances = int(0.6 * prev_instances + 0.4 * ml_instances)
+        # Smooth scaling
+        smoothing = config.get("ml_smoothing", 0.6)
+        ml_instances = int(
+            smoothing * prev_instances
+            + (1 - smoothing) * desired_instances
+        )
 
         instances.append(ml_instances)
         prev_instances = ml_instances
@@ -75,64 +90,85 @@ def run_ml_policy(df, model, config, window=10):
 # ==============================
 # HYBRID POLICY
 # ==============================
-def run_hybrid_policy(df, model, config, window=10):
+def run_hybrid_policy(df, model, config, window=None):
+    """
+    Hybrid autoscaling policy.
 
-    data = df["task_arrivals"].values
+    Combines ML prediction with a reactive safety check.
+    The ML model predicts demand from previous windows.
+    The reactive part checks current observed demand and prevents
+    major under-provisioning.
+    """
+
+    if window is None:
+        window = config["window"]
+
+    demand_col = config.get("demand_col", "task_arrivals")
+    data = df[demand_col].values
 
     instances = []
     prev_instances = 0
 
+    hybrid_threshold = config.get("hybrid_threshold", 1.2)
+    ml_weight = config.get("hybrid_ml_weight", 0.6)
+    reactive_weight = config.get("hybrid_reactive_weight", 0.4)
+    smoothing = config.get("hybrid_smoothing", 0.6)
+
     for t in range(window, len(data)):
 
         # ==============================
-        # ML prediction
+        # ML prediction from past values
         # ==============================
         window_data = data[t - window:t]
         pred = model.predict([window_data])[0]
 
-        current = data[t]
-
-        pred = 0.7 * pred + 0.3 * current
-        pred = pred * 1.1
+        pred = pred * config.get("ml_safety_buffer", 1.1)
 
         ml_instances = int(np.ceil(
             pred / config["capacity_per_instance"]
         ))
 
         # ==============================
-        # Reactive fallback
+        # Reactive guardrail
         # ==============================
+        current_demand = data[t]
+
         reactive_instances = int(np.ceil(
-            current / config["capacity_per_instance"]
+            current_demand / config["capacity_per_instance"]
         ))
 
         # ==============================
-        # 🔥 TRUE HYBRID LOGIC
+        # Hybrid decision logic
         # ==============================
 
-        # ==============================
-        # TRUE HYBRID LOGIC (FIXED)
-        # ==============================
-
-        # Safety: if ML underestimates → use reactive
+        # If ML underestimates, use reactive value for safety
         if ml_instances < reactive_instances:
-            inst = reactive_instances
+            desired_instances = reactive_instances
 
-        # If ML overshoots too much → scale it down
-        elif ml_instances > reactive_instances * 1.2:
-            inst = int(0.7 * ml_instances)
+        # If ML overshoots too much, reduce over-provisioning
+        elif ml_instances > reactive_instances * hybrid_threshold:
+            desired_instances = int(0.7 * ml_instances)
 
-        # Otherwise blend
+        # Otherwise blend ML and reactive decisions
         else:
-            inst = int(0.6 * ml_instances + 0.4 * reactive_instances)
+            desired_instances = int(
+                ml_weight * ml_instances
+                + reactive_weight * reactive_instances
+            )
 
         # Apply bounds
-        inst = max(0, min(inst, config["max_instances"]))
+        desired_instances = max(
+            0,
+            min(desired_instances, config["max_instances"])
+        )
 
         # Smooth scaling
-        inst = int(0.6 * prev_instances + 0.4 * inst)
+        hybrid_instances = int(
+            smoothing * prev_instances
+            + (1 - smoothing) * desired_instances
+        )
 
-        instances.append(inst)
-        prev_instances = inst
+        instances.append(hybrid_instances)
+        prev_instances = hybrid_instances
 
     return np.array(instances)

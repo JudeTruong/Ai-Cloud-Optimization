@@ -179,7 +179,14 @@ if __name__ == "__main__":
         "max_delta": 25,
         "instance_cost": 0.02,
         "under_penalty": 6,
-        "static_instances": 1200
+        "static_instances": 1200,
+        
+        "ml_safety_buffer": 1.1,
+        "ml_smoothing": 0.6,
+        "hybrid_threshold": 1.2,
+        "hybrid_ml_weight": 0.6,
+        "hybrid_reactive_weight": 0.4,
+        "hybrid_smoothing": 0.6
     }
 
     results = run_experiment(CONFIG)
