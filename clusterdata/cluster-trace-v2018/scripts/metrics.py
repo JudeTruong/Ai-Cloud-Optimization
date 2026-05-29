@@ -27,7 +27,14 @@ def compute_metrics(df, inst_col, config, demand_col=None):
         + df["under"] * config["under_penalty"]
     )
 
-    df["utilization"] = df[demand_col] / (df["capacity"] + 1e-6)
+    # Utilization is only meaningful when allocated capacity is greater than 0.
+    # If capacity is 0 and demand is positive, that interval is already captured
+    # by under-provisioning and SLA violation metrics.
+    df["utilization"] = np.where(
+        df["capacity"] > 0,
+        df[demand_col] / df["capacity"],
+        np.nan
+    )
 
     stability = df[inst_col].diff().abs().sum()
 
@@ -37,6 +44,6 @@ def compute_metrics(df, inst_col, config, demand_col=None):
         "total_over": df["over"].sum(),
         "sla_violation_rate": (df["under"] > 0).sum() / len(df) * 100,
         "stability": stability,
-        "avg_utilization": df["utilization"].mean(),
-        "peak_utilization": df["utilization"].max(),
+        "avg_utilization": np.nanmean(df["utilization"]),
+        "peak_utilization": np.nanmax(df["utilization"]),
     }

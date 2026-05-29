@@ -3,12 +3,28 @@ from sklearn.linear_model import LinearRegression
 
 
 # ==============================
+# HELPER: MAX DELTA LIMIT
+# ==============================
+def apply_max_delta(prev_instances, desired_instances, max_delta):
+    """
+    Limit how much the policy can scale up or down in one time step.
+    This makes ML and Hybrid obey the same scaling-rate constraint
+    as the other policies.
+    """
+
+    if desired_instances > prev_instances:
+        return min(prev_instances + max_delta, desired_instances)
+
+    return max(prev_instances - max_delta, desired_instances)
+
+
+# ==============================
 # TRAIN ML MODEL
 # ==============================
 def train_ml_model(df, config):
     """
-    Train a linear regression model using the previous window values
-    to predict the next workload demand value.
+    Train a linear regression model using previous window values
+    to predict future workload demand.
     """
 
     X = []
@@ -39,8 +55,8 @@ def run_ml_policy(df, model, config, window=None):
     """
     Pure ML autoscaling policy.
 
-    Uses previous workload windows to predict demand, then converts
-    predicted demand into instance count.
+    Uses only past workload values to predict demand.
+    It does not use current demand directly.
     """
 
     if window is None:
@@ -54,31 +70,35 @@ def run_ml_policy(df, model, config, window=None):
 
     for t in range(window, len(data)):
 
-        # Use only past demand values
+        # Predict using only past values
         window_data = data[t - window:t]
-
-        # Predict current/next demand from past window
         pred = model.predict([window_data])[0]
 
-        # Slight safety buffer to reduce under-provisioning
+        # Safety buffer
         pred = pred * config.get("ml_safety_buffer", 1.1)
 
-        # Convert predicted demand to instances
         desired_instances = int(np.ceil(
             pred / config["capacity_per_instance"]
         ))
 
-        # Apply bounds
         desired_instances = max(
             0,
             min(desired_instances, config["max_instances"])
         )
 
-        # Smooth scaling
+        # Smooth the desired value
         smoothing = config.get("ml_smoothing", 0.6)
-        ml_instances = int(
+
+        smoothed_instances = int(
             smoothing * prev_instances
             + (1 - smoothing) * desired_instances
+        )
+
+        # Enforce shared max_delta scaling constraint
+        ml_instances = apply_max_delta(
+            prev_instances,
+            smoothed_instances,
+            config["max_delta"]
         )
 
         instances.append(ml_instances)
@@ -94,10 +114,9 @@ def run_hybrid_policy(df, model, config, window=None):
     """
     Hybrid autoscaling policy.
 
-    Combines ML prediction with a reactive safety check.
-    The ML model predicts demand from previous windows.
-    The reactive part checks current observed demand and prevents
-    major under-provisioning.
+    Combines ML prediction with a reactive safety guardrail.
+    The reactive part can correct ML underestimation, but the final
+    scaling action still obeys max_delta for fairness.
     """
 
     if window is None:
@@ -129,7 +148,7 @@ def run_hybrid_policy(df, model, config, window=None):
         ))
 
         # ==============================
-        # Reactive guardrail
+        # Reactive guardrail using current observed demand
         # ==============================
         current_demand = data[t]
 
@@ -141,7 +160,7 @@ def run_hybrid_policy(df, model, config, window=None):
         # Hybrid decision logic
         # ==============================
 
-        # If ML underestimates, use reactive value for safety
+        # If ML underestimates, use reactive demand as the target
         if ml_instances < reactive_instances:
             desired_instances = reactive_instances
 
@@ -149,23 +168,33 @@ def run_hybrid_policy(df, model, config, window=None):
         elif ml_instances > reactive_instances * hybrid_threshold:
             desired_instances = int(0.7 * ml_instances)
 
-        # Otherwise blend ML and reactive decisions
+        # Otherwise blend both decisions
         else:
             desired_instances = int(
                 ml_weight * ml_instances
                 + reactive_weight * reactive_instances
             )
 
-        # Apply bounds
         desired_instances = max(
             0,
             min(desired_instances, config["max_instances"])
         )
 
-        # Smooth scaling
-        hybrid_instances = int(
+        # Smooth the desired value
+        smoothed_instances = int(
             smoothing * prev_instances
             + (1 - smoothing) * desired_instances
+        )
+
+        # Try to preserve the reactive safety target, but still obey max_delta
+        if ml_instances < reactive_instances:
+            smoothed_instances = max(smoothed_instances, reactive_instances)
+
+        # Enforce shared max_delta scaling constraint
+        hybrid_instances = apply_max_delta(
+            prev_instances,
+            smoothed_instances,
+            config["max_delta"]
         )
 
         instances.append(hybrid_instances)
